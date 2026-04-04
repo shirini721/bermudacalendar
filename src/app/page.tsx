@@ -1,15 +1,8 @@
 import { redirect } from 'next/navigation';
-import Link from 'next/link';
-import { createClient } from '@/lib/supabase/server';
-import { Calendar, Users, Bell, Upload, Shield, Smartphone } from 'lucide-react';
 
-export default async function LandingPage() {
-  const supabase = createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-
-  if (user) {
-    redirect('/calendar');
-  }
+export default function LandingPage() {
+  redirect('/calendar');
+}
 
   const features = [
     {

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
-import { notifyFamilyOfEvent } from '@/lib/notify';
+import { createServiceClient } from '@/lib/supabase/service';
+
+const FAMILY_GROUP_ID = process.env.FAMILY_GROUP_ID ?? '';
 
 interface RouteParams {
   params: { id: string };
@@ -8,23 +9,15 @@ interface RouteParams {
 
 export async function GET(_request: NextRequest, { params }: RouteParams) {
   try {
-    const supabase = createClient();
-
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-    if (authError || !user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
+    const supabase = createServiceClient();
     const { data: event, error } = await supabase
       .from('events')
       .select('*')
       .eq('id', params.id)
+      .eq('family_group_id', FAMILY_GROUP_ID)
       .single();
 
-    if (error || !event) {
-      return NextResponse.json({ error: 'Event not found' }, { status: 404 });
-    }
-
+    if (error || !event) return NextResponse.json({ error: 'Event not found' }, { status: 404 });
     return NextResponse.json({ event });
   } catch (err) {
     console.error('GET /api/events/[id] error:', err);
@@ -34,39 +27,11 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
 
 export async function PUT(request: NextRequest, { params }: RouteParams) {
   try {
-    const supabase = createClient();
-
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-    if (authError || !user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('family_group_id')
-      .eq('id', user.id)
-      .single();
-
-    if (!profile?.family_group_id) {
-      return NextResponse.json({ error: 'No family group found' }, { status: 404 });
-    }
-
+    const supabase = createServiceClient();
     const body = await request.json();
-    const {
-      title,
-      description,
-      start_at,
-      end_at,
-      all_day,
-      location,
-      category,
-      color,
-      recurrence_rule,
-      rsvp_enabled,
-      assigned_to,
-    } = body;
+    const { title, description, start_at, end_at, all_day, location, category, color, recurrence_rule, rsvp_enabled, assigned_to } = body;
 
-    const { data: event, error: updateError } = await supabase
+    const { data: event, error } = await supabase
       .from('events')
       .update({
         ...(title !== undefined && { title }),
@@ -82,32 +47,12 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
         ...(assigned_to !== undefined && { assigned_to }),
       })
       .eq('id', params.id)
-      .eq('family_group_id', profile.family_group_id)
+      .eq('family_group_id', FAMILY_GROUP_ID)
       .select()
       .single();
 
-    if (updateError) {
-      return NextResponse.json({ error: updateError.message }, { status: 500 });
-    }
-
-    if (!event) {
-      return NextResponse.json({ error: 'Event not found or unauthorized' }, { status: 404 });
-    }
-
-    // Send update notification
-    try {
-      const { data: members } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('family_group_id', profile.family_group_id);
-
-      if (members && members.length > 0) {
-        await notifyFamilyOfEvent(event, members, 'updated');
-      }
-    } catch (notifyErr) {
-      console.error('Failed to send update notifications:', notifyErr);
-    }
-
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+    if (!event) return NextResponse.json({ error: 'Event not found' }, { status: 404 });
     return NextResponse.json({ event });
   } catch (err) {
     console.error('PUT /api/events/[id] error:', err);
@@ -117,56 +62,14 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
 
 export async function DELETE(_request: NextRequest, { params }: RouteParams) {
   try {
-    const supabase = createClient();
-
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-    if (authError || !user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('family_group_id')
-      .eq('id', user.id)
-      .single();
-
-    if (!profile?.family_group_id) {
-      return NextResponse.json({ error: 'No family group found' }, { status: 404 });
-    }
-
-    // Get event before deletion for notification
-    const { data: event } = await supabase
-      .from('events')
-      .select('*')
-      .eq('id', params.id)
-      .single();
-
-    const { error: deleteError } = await supabase
+    const supabase = createServiceClient();
+    const { error } = await supabase
       .from('events')
       .delete()
       .eq('id', params.id)
-      .eq('family_group_id', profile.family_group_id);
+      .eq('family_group_id', FAMILY_GROUP_ID);
 
-    if (deleteError) {
-      return NextResponse.json({ error: deleteError.message }, { status: 500 });
-    }
-
-    // Send deletion notification
-    if (event) {
-      try {
-        const { data: members } = await supabase
-          .from('profiles')
-          .select('*')
-          .eq('family_group_id', profile.family_group_id);
-
-        if (members && members.length > 0) {
-          await notifyFamilyOfEvent(event, members, 'deleted');
-        }
-      } catch (notifyErr) {
-        console.error('Failed to send deletion notifications:', notifyErr);
-      }
-    }
-
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 });
     return NextResponse.json({ success: true });
   } catch (err) {
     console.error('DELETE /api/events/[id] error:', err);
