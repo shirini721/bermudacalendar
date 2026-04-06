@@ -1,20 +1,26 @@
 import fs from 'fs';
 import path from 'path';
-import type { Event } from '@/types';
+import type { CalEvent } from '@/types';
 
-const DATA_DIR = path.join(process.cwd(), 'data');
-const DATA_FILE = path.join(DATA_DIR, 'events.json');
+const DATA_FILE = path.join(process.cwd(), 'data', 'events.json');
 
-export function readEvents(): Event[] {
-  if (!fs.existsSync(DATA_FILE)) return [];
+export function getEvents(): CalEvent[] {
   try {
-    return JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8')) as Event[];
+    if (!fs.existsSync(DATA_FILE)) {
+      return [];
+    }
+    const raw = fs.readFileSync(DATA_FILE, 'utf-8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
 }
 
-export function writeEvents(events: Event[]): void {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(DATA_FILE, JSON.stringify(events, null, 2));
+export function saveEvents(events: CalEvent[]): void {
+  const dir = path.dirname(DATA_FILE);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  fs.writeFileSync(DATA_FILE, JSON.stringify(events, null, 2), 'utf-8');
 }

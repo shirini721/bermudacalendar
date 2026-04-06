@@ -1,37 +1,31 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readEvents, writeEvents } from '@/lib/db';
-import type { Event } from '@/types';
+import { getEvents, saveEvents } from '@/lib/db';
+import type { CalEvent } from '@/types';
 
 export async function GET() {
-  return NextResponse.json({ events: readEvents() });
+  const events = getEvents();
+  return NextResponse.json({ events });
 }
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
-  const { title, description, start_at, end_at, all_day, location, category, color } = body;
+  const events = getEvents();
 
-  if (!title || !start_at || !end_at) {
-    return NextResponse.json({ error: 'title, start_at, and end_at are required' }, { status: 400 });
-  }
-
-  const now = new Date().toISOString();
-  const event: Event = {
+  const newEvent: CalEvent = {
     id: crypto.randomUUID(),
-    title,
-    description: description ?? null,
-    start_at,
-    end_at,
-    all_day: all_day ?? false,
-    location: location ?? null,
-    category: category ?? 'other',
-    color: color ?? null,
-    created_at: now,
-    updated_at: now,
+    title: String(body.title || '').trim(),
+    description: body.description ? String(body.description).trim() || null : null,
+    start: String(body.start),
+    end: String(body.end),
+    allDay: Boolean(body.allDay),
+    location: body.location ? String(body.location).trim() || null : null,
+    category: body.category || 'other',
+    color: body.color || null,
+    createdAt: new Date().toISOString(),
   };
 
-  const events = readEvents();
-  events.push(event);
-  writeEvents(events);
+  events.push(newEvent);
+  saveEvents(events);
 
-  return NextResponse.json({ event }, { status: 201 });
+  return NextResponse.json({ event: newEvent }, { status: 201 });
 }

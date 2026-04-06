@@ -1,31 +1,54 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readEvents, writeEvents } from '@/lib/db';
+import { getEvents, saveEvents } from '@/lib/db';
+import type { CalEvent } from '@/types';
 
-interface RouteParams {
-  params: { id: string };
-}
-
-export async function PUT(request: NextRequest, { params }: RouteParams) {
+export async function PUT(
+  request: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  const { id } = params;
   const body = await request.json();
-  const events = readEvents();
-  const idx = events.findIndex(e => e.id === params.id);
+  const events = getEvents();
+  const idx = events.findIndex(e => e.id === id);
 
-  if (idx === -1) return NextResponse.json({ error: 'Event not found' }, { status: 404 });
+  if (idx === -1) {
+    return NextResponse.json({ error: 'Event not found' }, { status: 404 });
+  }
 
-  events[idx] = { ...events[idx], ...body, id: params.id, updated_at: new Date().toISOString() };
-  writeEvents(events);
+  const updated: CalEvent = {
+    ...events[idx],
+    title: String(body.title || '').trim() || events[idx].title,
+    description: body.description !== undefined
+      ? (String(body.description).trim() || null)
+      : events[idx].description,
+    start: body.start !== undefined ? String(body.start) : events[idx].start,
+    end: body.end !== undefined ? String(body.end) : events[idx].end,
+    allDay: body.allDay !== undefined ? Boolean(body.allDay) : events[idx].allDay,
+    location: body.location !== undefined
+      ? (String(body.location).trim() || null)
+      : events[idx].location,
+    category: body.category || events[idx].category,
+    color: body.color !== undefined ? body.color : events[idx].color,
+  };
 
-  return NextResponse.json({ event: events[idx] });
+  events[idx] = updated;
+  saveEvents(events);
+
+  return NextResponse.json({ event: updated });
 }
 
-export async function DELETE(_request: NextRequest, { params }: RouteParams) {
-  const events = readEvents();
-  const filtered = events.filter(e => e.id !== params.id);
+export async function DELETE(
+  _request: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  const { id } = params;
+  const events = getEvents();
+  const filtered = events.filter(e => e.id !== id);
 
   if (filtered.length === events.length) {
     return NextResponse.json({ error: 'Event not found' }, { status: 404 });
   }
 
-  writeEvents(filtered);
-  return NextResponse.json({ success: true });
+  saveEvents(filtered);
+  return NextResponse.json({ ok: true });
 }

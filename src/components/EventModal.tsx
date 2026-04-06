@@ -1,185 +1,361 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { X, MapPin, FileText, Clock, Tag } from 'lucide-react';
-import { format } from 'date-fns';
-import type { Event } from '@/types';
-import { EventCategory, CATEGORY_LABELS, CATEGORY_COLORS } from '@/types';
-import clsx from 'clsx';
+import { useState, useEffect, useCallback, FormEvent } from 'react';
+import { X, Trash2, MapPin, AlignLeft } from 'lucide-react';
+import type { CalEvent } from '@/types';
+
+type Category = CalEvent['category'];
+
+const CATEGORIES: { value: Category; label: string; color: string }[] = [
+  { value: 'school', label: 'School', color: '#6366f1' },
+  { value: 'sports', label: 'Sports', color: '#10b981' },
+  { value: 'medical', label: 'Medical', color: '#ef4444' },
+  { value: 'vacation', label: 'Vacation', color: '#f59e0b' },
+  { value: 'birthday', label: 'Birthday', color: '#ec4899' },
+  { value: 'other', label: 'Other', color: '#6b7280' },
+];
 
 interface EventModalProps {
-  event?: Event | null;
-  defaultStart?: Date;
+  event?: CalEvent | null;
+  defaultDate?: string | null;
   onClose: () => void;
-  onSaved: (event: Event) => void;
-  onDeleted?: (eventId: string) => void;
+  onSave: (event: CalEvent) => void;
+  onDelete?: (id: string) => void;
 }
 
-function formatDateLocal(isoString: string): string {
-  return isoString.substring(0, 10);
+function toDateInput(iso: string | undefined): string {
+  if (!iso) return '';
+  return iso.slice(0, 10);
 }
 
-function formatTimeLocal(isoString: string): string {
-  const d = new Date(isoString);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+function toTimeInput(iso: string | undefined): string {
+  if (!iso || !iso.includes('T')) return '';
+  return iso.slice(11, 16);
 }
 
-export default function EventModal({ event, defaultStart, onClose, onSaved, onDeleted }: EventModalProps) {
+export default function EventModal({ event, defaultDate, onClose, onSave, onDelete }: EventModalProps) {
   const isEditing = !!event;
 
-  const defaultStartDate = event ? formatDateLocal(event.start_at)
-    : defaultStart ? format(defaultStart, 'yyyy-MM-dd')
-    : format(new Date(), 'yyyy-MM-dd');
-
-  const defaultEndDate = event ? formatDateLocal(event.end_at)
-    : defaultStart ? format(defaultStart, 'yyyy-MM-dd')
-    : format(new Date(), 'yyyy-MM-dd');
-
   const [title, setTitle] = useState(event?.title ?? '');
-  const [description, setDescription] = useState(event?.description ?? '');
+  const [category, setCategory] = useState<Category>(event?.category ?? 'other');
+  const [allDay, setAllDay] = useState(event?.allDay ?? true);
+  const [startDate, setStartDate] = useState(
+    event ? toDateInput(event.start) : (defaultDate ?? toDateInput(new Date().toISOString()))
+  );
+  const [endDate, setEndDate] = useState(
+    event ? toDateInput(event.end) : (defaultDate ?? toDateInput(new Date().toISOString()))
+  );
+  const [startTime, setStartTime] = useState(event ? toTimeInput(event.start) : '09:00');
+  const [endTime, setEndTime] = useState(event ? toTimeInput(event.end) : '10:00');
   const [location, setLocation] = useState(event?.location ?? '');
-  const [startDate, setStartDate] = useState(defaultStartDate);
-  const [endDate, setEndDate] = useState(defaultEndDate);
-  const [startTime, setStartTime] = useState(event && !event.all_day ? formatTimeLocal(event.start_at) : '09:00');
-  const [endTime, setEndTime] = useState(event && !event.all_day ? formatTimeLocal(event.end_at) : '10:00');
-  const [allDay, setAllDay] = useState(event?.all_day ?? true);
-  const [category, setCategory] = useState<EventCategory>(event?.category ?? EventCategory.Other);
-  const [loading, setLoading] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [description, setDescription] = useState(event?.description ?? '');
+  const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [error, setError] = useState('');
 
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('keydown', handler);
-    return () => document.removeEventListener('keydown', handler);
+  const handleClose = useCallback(() => {
+    onClose();
   }, [onClose]);
 
-  async function handleSubmit(e: React.FormEvent) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') handleClose();
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [handleClose]);
+
+  function buildIso(date: string, time: string, isAllDay: boolean): string {
+    if (!date) return new Date().toISOString();
+    if (isAllDay || !time) return date;
+    return `${date}T${time}:00`;
+  }
+
+  async function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    setLoading(true);
-    setError(null);
+    if (!title.trim()) {
+      setError('Title is required.');
+      return;
+    }
+    if (!startDate) {
+      setError('Start date is required.');
+      return;
+    }
+    setError('');
+    setSaving(true);
 
-    const start_at = allDay ? `${startDate}T00:00:00` : `${startDate}T${startTime}:00`;
-    const end_at = allDay ? `${endDate}T23:59:59` : `${endDate}T${endTime}:00`;
-
-    const payload = { title: title.trim(), description: description.trim() || null, location: location.trim() || null, start_at, end_at, all_day: allDay, category };
+    const payload = {
+      title: title.trim(),
+      category,
+      allDay,
+      start: buildIso(startDate, startTime, allDay),
+      end: buildIso(endDate || startDate, endTime || startTime, allDay),
+      location: location.trim() || null,
+      description: description.trim() || null,
+      color: null,
+    };
 
     try {
-      const res = await fetch(isEditing ? `/api/events/${event.id}` : '/api/events', {
-        method: isEditing ? 'PUT' : 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
+      let res: Response;
+      if (isEditing && event) {
+        res = await fetch(`/api/events/${event.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      } else {
+        res = await fetch('/api/events', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      }
+
+      if (!res.ok) throw new Error('Save failed');
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'Failed to save event');
-      onSaved(data.event);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Something went wrong');
+      onSave(data.event);
+      onClose();
+    } catch {
+      setError('Failed to save event. Please try again.');
     } finally {
-      setLoading(false);
+      setSaving(false);
     }
   }
 
   async function handleDelete() {
-    if (!event || !onDeleted) return;
-    setDeleting(true);
+    if (!event) return;
+    setSaving(true);
     try {
       const res = await fetch(`/api/events/${event.id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete');
-      onDeleted(event.id);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Something went wrong');
-      setDeleting(false);
+      if (!res.ok) throw new Error('Delete failed');
+      onDelete?.(event.id);
+      onClose();
+    } catch {
+      setError('Failed to delete event. Please try again.');
+      setSaving(false);
     }
   }
 
+  const catInfo = CATEGORIES.find(c => c.value === category);
+
   return (
-    <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="modal-content">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 sticky top-0 bg-white rounded-t-2xl z-10">
-          <h2 className="text-lg font-semibold text-gray-900">{isEditing ? 'Edit Event' : 'New Event'}</h2>
-          <button onClick={onClose} className="rounded-lg p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors">
-            <X className="h-5 w-5" />
+    <div className="modal-overlay" onClick={handleClose}>
+      <div className="modal-content" onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+          <h2 className="font-semibold text-gray-900">{isEditing ? 'Edit Event' : 'New Event'}</h2>
+          <button onClick={handleClose} className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors">
+            <X className="w-4 h-4 text-gray-500" />
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-6 space-y-5">
+        <form onSubmit={handleSubmit} className="px-6 py-5 space-y-5">
+          {/* Title */}
           <div>
-            <label className="label">Title *</label>
-            <input type="text" value={title} onChange={e => setTitle(e.target.value)} placeholder="e.g. Soccer Practice" className="input-field text-base font-medium" required autoFocus />
+            <label className="label" htmlFor="ev-title">Title *</label>
+            <input
+              id="ev-title"
+              type="text"
+              value={title}
+              onChange={e => setTitle(e.target.value)}
+              className="input-field"
+              placeholder="Event title"
+              autoFocus
+              required
+            />
           </div>
 
+          {/* Category pills */}
           <div>
-            <label className="label flex items-center gap-1.5"><Tag className="h-3.5 w-3.5" />Category</label>
+            <span className="label">Category</span>
             <div className="flex flex-wrap gap-2">
-              {Object.values(EventCategory).map(cat => (
-                <button key={cat} type="button" onClick={() => setCategory(cat)}
-                  className={clsx('flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium border transition-all',
-                    category === cat ? 'text-white border-transparent shadow-sm' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300')}
-                  style={category === cat ? { backgroundColor: CATEGORY_COLORS[cat], borderColor: CATEGORY_COLORS[cat] } : {}}>
-                  {CATEGORY_LABELS[cat]}
+              {CATEGORIES.map(cat => (
+                <button
+                  key={cat.value}
+                  type="button"
+                  onClick={() => setCategory(cat.value)}
+                  className="px-3 py-1.5 rounded-full text-xs font-medium transition-all border"
+                  style={
+                    category === cat.value
+                      ? { backgroundColor: cat.color, color: '#fff', borderColor: cat.color }
+                      : { backgroundColor: 'transparent', color: cat.color, borderColor: cat.color }
+                  }
+                >
+                  {cat.label}
                 </button>
               ))}
             </div>
           </div>
 
-          <div className="flex items-center justify-between rounded-xl border border-gray-200 bg-gray-50 px-4 py-3">
-            <div className="flex items-center gap-2">
-              <Clock className="h-4 w-4 text-gray-500" />
-              <span className="text-sm font-medium text-gray-700">All Day Event</span>
-            </div>
-            <button type="button" role="switch" aria-checked={allDay} onClick={() => setAllDay(!allDay)}
-              className={clsx('relative inline-flex h-5 w-9 flex-shrink-0 rounded-full border-2 border-transparent transition-colors duration-200', allDay ? 'bg-brand-600' : 'bg-gray-200')}>
-              <span className={clsx('inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-200', allDay ? 'translate-x-4' : 'translate-x-0')} />
+          {/* All day toggle */}
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={allDay}
+              onClick={() => setAllDay(v => !v)}
+              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                allDay ? 'bg-brand-600' : 'bg-gray-200'
+              }`}
+            >
+              <span
+                className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${
+                  allDay ? 'translate-x-4.5' : 'translate-x-0.5'
+                }`}
+              />
             </button>
+            <span className="text-sm text-gray-700">All day</span>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          {/* Dates */}
+          <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="label">Start Date *</label>
-              <input type="date" value={startDate} onChange={e => { setStartDate(e.target.value); if (e.target.value > endDate) setEndDate(e.target.value); }} className="input-field" required />
+              <label className="label" htmlFor="ev-start-date">Start date</label>
+              <input
+                id="ev-start-date"
+                type="date"
+                value={startDate}
+                onChange={e => {
+                  setStartDate(e.target.value);
+                  if (!endDate || endDate < e.target.value) setEndDate(e.target.value);
+                }}
+                className="input-field"
+                required
+              />
             </div>
             <div>
-              <label className="label">End Date *</label>
-              <input type="date" value={endDate} min={startDate} onChange={e => setEndDate(e.target.value)} className="input-field" required />
+              <label className="label" htmlFor="ev-end-date">End date</label>
+              <input
+                id="ev-end-date"
+                type="date"
+                value={endDate}
+                min={startDate}
+                onChange={e => setEndDate(e.target.value)}
+                className="input-field"
+              />
             </div>
-            {!allDay && (
+          </div>
+
+          {/* Times */}
+          {!allDay && (
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="label" htmlFor="ev-start-time">Start time</label>
+                <input
+                  id="ev-start-time"
+                  type="time"
+                  value={startTime}
+                  onChange={e => setStartTime(e.target.value)}
+                  className="input-field"
+                />
+              </div>
+              <div>
+                <label className="label" htmlFor="ev-end-time">End time</label>
+                <input
+                  id="ev-end-time"
+                  type="time"
+                  value={endTime}
+                  onChange={e => setEndTime(e.target.value)}
+                  className="input-field"
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Location */}
+          <div>
+            <label className="label" htmlFor="ev-location">Location</label>
+            <div className="relative">
+              <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <input
+                id="ev-location"
+                type="text"
+                value={location}
+                onChange={e => setLocation(e.target.value)}
+                className="input-field pl-9"
+                placeholder="Optional location"
+              />
+            </div>
+          </div>
+
+          {/* Notes */}
+          <div>
+            <label className="label" htmlFor="ev-notes">Notes</label>
+            <div className="relative">
+              <AlignLeft className="absolute left-3 top-2.5 w-4 h-4 text-gray-400" />
+              <textarea
+                id="ev-notes"
+                value={description}
+                onChange={e => setDescription(e.target.value)}
+                rows={3}
+                className="input-field pl-9 resize-none"
+                placeholder="Optional notes or description"
+              />
+            </div>
+          </div>
+
+          {/* Error */}
+          {error && (
+            <div className="rounded-lg bg-red-50 border border-red-200 px-3 py-2 text-sm text-red-700">
+              {error}
+            </div>
+          )}
+
+          {/* Actions */}
+          <div className="flex items-center gap-2 pt-1">
+            {isEditing && (
               <>
-                <div>
-                  <label className="label">Start Time</label>
-                  <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)} className="input-field" />
-                </div>
-                <div>
-                  <label className="label">End Time</label>
-                  <input type="time" value={endTime} onChange={e => setEndTime(e.target.value)} className="input-field" />
-                </div>
+                {confirmDelete ? (
+                  <div className="flex items-center gap-2 mr-auto">
+                    <span className="text-xs text-red-600 font-medium">Delete this event?</span>
+                    <button
+                      type="button"
+                      onClick={handleDelete}
+                      disabled={saving}
+                      className="px-3 py-1.5 rounded-lg bg-red-600 text-white text-xs font-medium hover:bg-red-700 transition-colors"
+                    >
+                      Yes, delete
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDelete(false)}
+                      className="px-3 py-1.5 rounded-lg border border-gray-200 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDelete(true)}
+                    className="mr-auto p-2 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors"
+                    title="Delete event"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
               </>
             )}
-          </div>
 
-          <div>
-            <label className="label flex items-center gap-1.5"><MapPin className="h-3.5 w-3.5" />Location</label>
-            <input type="text" value={location} onChange={e => setLocation(e.target.value)} placeholder="e.g. Central Park" className="input-field" />
-          </div>
-
-          <div>
-            <label className="label flex items-center gap-1.5"><FileText className="h-3.5 w-3.5" />Notes</label>
-            <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="Add any notes or details..." rows={3} className="input-field resize-none" />
-          </div>
-
-          {error && <div className="rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-700">{error}</div>}
-
-          <div className="flex items-center gap-3 pt-1">
-            {isEditing && onDeleted && (
-              confirmDelete
-                ? <button type="button" onClick={handleDelete} disabled={deleting} className="btn-danger">{deleting ? 'Deleting...' : 'Confirm Delete'}</button>
-                : <button type="button" onClick={() => setConfirmDelete(true)} className="btn-secondary text-red-600 border-red-200 hover:bg-red-50">Delete</button>
+            {!confirmDelete && (
+              <>
+                <button
+                  type="button"
+                  onClick={handleClose}
+                  className="btn-secondary ml-auto"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="btn-primary"
+                  style={{ backgroundColor: catInfo?.color, borderColor: catInfo?.color }}
+                >
+                  {saving ? 'Saving…' : isEditing ? 'Save changes' : 'Add event'}
+                </button>
+              </>
             )}
-            <div className="flex-1" />
-            <button type="button" onClick={onClose} className="btn-secondary">Cancel</button>
-            <button type="submit" disabled={loading} className="btn-primary">{loading ? 'Saving...' : isEditing ? 'Save Changes' : 'Create Event'}</button>
           </div>
         </form>
       </div>

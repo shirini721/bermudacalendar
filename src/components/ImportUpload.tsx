@@ -2,48 +2,53 @@
 
 import { useState, useCallback } from 'react';
 import { useDropzone } from 'react-dropzone';
+import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, X } from 'lucide-react';
 import { parseSpreadsheet } from '@/lib/parseSpreadsheet';
-import type { ParsedEventRow } from '@/types';
-import { CATEGORY_LABELS } from '@/types';
-import { Upload, FileSpreadsheet, X, CheckCircle, AlertCircle, Loader2 } from 'lucide-react';
-import { format } from 'date-fns';
-import clsx from 'clsx';
+import type { CalEvent } from '@/types';
 
-interface ImportUploadProps {
-  familyGroupId: string;
-  userId: string;
+const CATEGORY_COLORS: Record<CalEvent['category'], string> = {
+  school: '#6366f1',
+  sports: '#10b981',
+  medical: '#ef4444',
+  vacation: '#f59e0b',
+  birthday: '#ec4899',
+  other: '#6b7280',
+};
+
+function formatDate(iso: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-type ImportStatus = 'idle' | 'parsing' | 'preview' | 'importing' | 'success' | 'error';
-
-export default function ImportUpload({ familyGroupId, userId }: ImportUploadProps) {
-  const [status, setStatus] = useState<ImportStatus>('idle');
-  const [fileName, setFileName] = useState<string>('');
-  const [parsedEvents, setParsedEvents] = useState<ParsedEventRow[]>([]);
-  const [importedCount, setImportedCount] = useState(0);
-  const [errorMessage, setErrorMessage] = useState<string>('');
+export default function ImportUpload() {
+  const [parsed, setParsed] = useState<CalEvent[] | null>(null);
+  const [fileName, setFileName] = useState('');
+  const [parseError, setParseError] = useState('');
+  const [importing, setImporting] = useState(false);
+  const [importedCount, setImportedCount] = useState<number | null>(null);
 
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
     const file = acceptedFiles[0];
     if (!file) return;
 
+    setParseError('');
+    setImportedCount(null);
+    setParsed(null);
     setFileName(file.name);
-    setStatus('parsing');
-    setErrorMessage('');
 
     try {
       const buffer = await file.arrayBuffer();
       const events = parseSpreadsheet(buffer);
-
       if (events.length === 0) {
-        throw new Error('No valid events found. Make sure your file has a "title" column and "start_date" column.');
+        setParseError('No events found in the file. Check that your file matches one of the supported formats.');
+      } else {
+        setParsed(events);
       }
-
-      setParsedEvents(events);
-      setStatus('preview');
     } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : 'Failed to parse file');
-      setStatus('error');
+      console.error(err);
+      setParseError('Failed to parse the file. Make sure it is a valid .xlsx, .xls, or .csv file.');
     }
   }, []);
 
@@ -53,223 +58,156 @@ export default function ImportUpload({ familyGroupId, userId }: ImportUploadProp
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
       'application/vnd.ms-excel': ['.xls'],
       'text/csv': ['.csv'],
-      'text/plain': ['.csv'],
     },
-    maxFiles: 1,
-    disabled: status === 'importing' || status === 'success',
+    multiple: false,
   });
 
-  async function handleConfirmImport() {
-    setStatus('importing');
-    setErrorMessage('');
-
+  async function handleImport() {
+    if (!parsed || parsed.length === 0) return;
+    setImporting(true);
     try {
       const res = await fetch('/api/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          events: parsedEvents,
-          familyGroupId,
-          userId,
-        }),
+        body: JSON.stringify({ events: parsed }),
       });
-
+      if (!res.ok) throw new Error('Import failed');
       const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.error ?? 'Import failed');
-      }
-
-      setImportedCount(data.count ?? parsedEvents.length);
-      setStatus('success');
-    } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : 'Import failed');
-      setStatus('error');
+      setImportedCount(data.count);
+      setParsed(null);
+      setFileName('');
+    } catch {
+      setParseError('Import failed. Please try again.');
+    } finally {
+      setImporting(false);
     }
   }
 
   function handleReset() {
-    setStatus('idle');
+    setParsed(null);
     setFileName('');
-    setParsedEvents([]);
-    setErrorMessage('');
-    setImportedCount(0);
-  }
-
-  function formatPreviewDate(isoStr: string): string {
-    try {
-      return format(new Date(isoStr), 'MMM d, yyyy');
-    } catch {
-      return isoStr;
-    }
-  }
-
-  // Success state
-  if (status === 'success') {
-    return (
-      <div className="text-center py-8">
-        <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-          <CheckCircle className="h-8 w-8 text-green-600" />
-        </div>
-        <h3 className="text-xl font-semibold text-gray-900 mb-2">Import Successful!</h3>
-        <p className="text-gray-600 mb-6">
-          {importedCount} event{importedCount !== 1 ? 's' : ''} have been added to your family calendar.
-          Family members will receive an email notification.
-        </p>
-        <div className="flex justify-center gap-3">
-          <button onClick={handleReset} className="btn-secondary">
-            Import More
-          </button>
-          <a href="/calendar" className="btn-primary">
-            View Calendar
-          </a>
-        </div>
-      </div>
-    );
-  }
-
-  // Preview state
-  if (status === 'preview') {
-    return (
-      <div>
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-2">
-            <FileSpreadsheet className="h-5 w-5 text-brand-600" />
-            <span className="font-medium text-gray-900">{fileName}</span>
-            <span className="text-sm text-gray-500">({parsedEvents.length} events found)</span>
-          </div>
-          <button onClick={handleReset} className="text-gray-400 hover:text-gray-600">
-            <X className="h-5 w-5" />
-          </button>
-        </div>
-
-        {/* Preview Table */}
-        <div className="overflow-auto max-h-96 rounded-lg border border-gray-200 mb-4">
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50 sticky top-0">
-              <tr>
-                <th className="text-left text-xs font-semibold text-gray-600 px-3 py-2">Title</th>
-                <th className="text-left text-xs font-semibold text-gray-600 px-3 py-2">Start</th>
-                <th className="text-left text-xs font-semibold text-gray-600 px-3 py-2">End</th>
-                <th className="text-left text-xs font-semibold text-gray-600 px-3 py-2">Category</th>
-                <th className="text-left text-xs font-semibold text-gray-600 px-3 py-2">Location</th>
-                <th className="text-left text-xs font-semibold text-gray-600 px-3 py-2">All Day</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {parsedEvents.map((ev, i) => (
-                <tr key={i} className="hover:bg-gray-50">
-                  <td className="px-3 py-2 font-medium text-gray-900 max-w-[180px] truncate">
-                    {ev.title}
-                  </td>
-                  <td className="px-3 py-2 text-gray-700 whitespace-nowrap">
-                    {formatPreviewDate(ev.start_at)}
-                  </td>
-                  <td className="px-3 py-2 text-gray-700 whitespace-nowrap">
-                    {formatPreviewDate(ev.end_at)}
-                  </td>
-                  <td className="px-3 py-2">
-                    <span className="inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-700">
-                      {CATEGORY_LABELS[ev.category]}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2 text-gray-600 max-w-[120px] truncate">
-                    {ev.location ?? '—'}
-                  </td>
-                  <td className="px-3 py-2 text-gray-600">
-                    {ev.all_day ? 'Yes' : 'No'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        {parsedEvents.length > 10 && (
-          <p className="text-xs text-gray-500 mb-4">
-            Showing all {parsedEvents.length} events. Scroll to see more.
-          </p>
-        )}
-
-        <div className="flex items-center gap-3">
-          <button onClick={handleReset} className="btn-secondary">
-            Cancel
-          </button>
-          <button
-            onClick={handleConfirmImport}
-            className="btn-primary"
-          >
-            <CheckCircle className="h-4 w-4" />
-            Import {parsedEvents.length} Event{parsedEvents.length !== 1 ? 's' : ''}
-          </button>
-        </div>
-      </div>
-    );
+    setParseError('');
+    setImportedCount(null);
   }
 
   return (
-    <div>
-      {/* Dropzone */}
-      <div
-        {...getRootProps()}
-        className={clsx(
-          'relative rounded-xl border-2 border-dashed p-10 text-center cursor-pointer transition-all',
-          isDragActive
-            ? 'border-brand-400 bg-brand-50'
-            : 'border-gray-300 bg-gray-50 hover:border-brand-300 hover:bg-brand-50/50',
-          status === 'parsing' && 'pointer-events-none opacity-70'
-        )}
-      >
-        <input {...getInputProps()} />
-
-        {status === 'parsing' ? (
-          <div className="flex flex-col items-center gap-3">
-            <Loader2 className="h-10 w-10 text-brand-500 animate-spin" />
-            <p className="text-gray-600 font-medium">Parsing {fileName}...</p>
+    <div className="space-y-6">
+      {/* Success */}
+      {importedCount !== null && (
+        <div className="rounded-xl bg-green-50 border border-green-200 px-4 py-4 flex items-start gap-3">
+          <CheckCircle className="w-5 h-5 text-green-600 mt-0.5 flex-shrink-0" />
+          <div>
+            <p className="text-sm font-medium text-green-800">
+              Successfully imported {importedCount} event{importedCount !== 1 ? 's' : ''}!
+            </p>
+            <p className="text-xs text-green-600 mt-0.5">
+              Head to the <a href="/calendar" className="underline font-medium">Calendar</a> to see them.
+            </p>
           </div>
-        ) : status === 'error' ? (
-          <div className="flex flex-col items-center gap-3">
-            <AlertCircle className="h-10 w-10 text-red-400" />
-            <div>
-              <p className="font-medium text-red-700 mb-1">Failed to parse file</p>
-              <p className="text-sm text-red-600">{errorMessage}</p>
+          <button onClick={handleReset} className="ml-auto text-green-400 hover:text-green-600">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Drop zone */}
+      {!parsed && importedCount === null && (
+        <div
+          {...getRootProps()}
+          className={`border-2 border-dashed rounded-2xl p-10 text-center cursor-pointer transition-colors ${
+            isDragActive
+              ? 'border-brand-400 bg-brand-50'
+              : 'border-gray-200 bg-white hover:border-brand-300 hover:bg-gray-50'
+          }`}
+        >
+          <input {...getInputProps()} />
+          <Upload className={`w-10 h-10 mx-auto mb-3 ${isDragActive ? 'text-brand-500' : 'text-gray-300'}`} />
+          {isDragActive ? (
+            <p className="text-brand-600 font-medium">Drop it here!</p>
+          ) : (
+            <>
+              <p className="text-gray-600 font-medium">Drag & drop your spreadsheet here</p>
+              <p className="text-gray-400 text-sm mt-1">or click to browse</p>
+              <p className="text-xs text-gray-400 mt-3">Supports .xlsx, .xls, .csv</p>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Parse error */}
+      {parseError && (
+        <div className="rounded-xl bg-red-50 border border-red-200 px-4 py-3 flex items-start gap-3">
+          <AlertCircle className="w-4 h-4 text-red-500 mt-0.5 flex-shrink-0" />
+          <p className="text-sm text-red-700">{parseError}</p>
+          <button onClick={handleReset} className="ml-auto text-red-400 hover:text-red-600">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Preview */}
+      {parsed && parsed.length > 0 && (
+        <div className="card overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+            <div className="flex items-center gap-2">
+              <FileSpreadsheet className="w-4 h-4 text-brand-600" />
+              <span className="text-sm font-medium text-gray-800">{fileName}</span>
+              <span className="text-xs text-gray-400">— {parsed.length} events found</span>
             </div>
-            <button
-              type="button"
-              onClick={e => { e.stopPropagation(); handleReset(); }}
-              className="btn-secondary text-xs"
-            >
-              Try Again
+            <button onClick={handleReset} className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600">
+              <X className="w-4 h-4" />
             </button>
           </div>
-        ) : (
-          <div className="flex flex-col items-center gap-3">
-            <div className={clsx(
-              'w-16 h-16 rounded-full flex items-center justify-center transition-colors',
-              isDragActive ? 'bg-brand-100' : 'bg-gray-200'
-            )}>
-              <Upload className={clsx(
-                'h-8 w-8 transition-colors',
-                isDragActive ? 'text-brand-600' : 'text-gray-500'
-              )} />
-            </div>
-            <div>
-              <p className="text-base font-semibold text-gray-900">
-                {isDragActive ? 'Drop your file here' : 'Drag & drop your spreadsheet'}
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-gray-50 text-xs text-gray-500 uppercase tracking-wide">
+                  <th className="px-4 py-2 text-left font-medium">Title</th>
+                  <th className="px-4 py-2 text-left font-medium">Date</th>
+                  <th className="px-4 py-2 text-left font-medium">Category</th>
+                  <th className="px-4 py-2 text-left font-medium">All day</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-50">
+                {parsed.slice(0, 50).map((ev) => (
+                  <tr key={ev.id} className="hover:bg-gray-50/50">
+                    <td className="px-4 py-2 text-gray-900 max-w-xs truncate">{ev.title}</td>
+                    <td className="px-4 py-2 text-gray-500 whitespace-nowrap">{formatDate(ev.start)}</td>
+                    <td className="px-4 py-2">
+                      <span
+                        className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium text-white"
+                        style={{ backgroundColor: CATEGORY_COLORS[ev.category] }}
+                      >
+                        {ev.category}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2 text-gray-500">{ev.allDay ? 'Yes' : 'No'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {parsed.length > 50 && (
+              <p className="px-4 py-2 text-xs text-gray-400 border-t border-gray-100">
+                Showing first 50 of {parsed.length} events.
               </p>
-              <p className="text-sm text-gray-500 mt-1">
-                or <span className="text-brand-600 font-medium">browse to upload</span>
-              </p>
-            </div>
-            <div className="flex gap-2 text-xs text-gray-400">
-              <span className="rounded px-2 py-0.5 bg-gray-200">.xlsx</span>
-              <span className="rounded px-2 py-0.5 bg-gray-200">.xls</span>
-              <span className="rounded px-2 py-0.5 bg-gray-200">.csv</span>
-            </div>
-            <p className="text-xs text-gray-400">Max 500 events per import</p>
+            )}
           </div>
-        )}
-      </div>
+
+          <div className="px-4 py-3 border-t border-gray-100 flex items-center justify-between bg-gray-50/50">
+            <p className="text-xs text-gray-500">
+              Review the events above, then click Import to add them to your calendar.
+            </p>
+            <button
+              onClick={handleImport}
+              disabled={importing}
+              className="btn-primary"
+            >
+              {importing ? 'Importing…' : `Import ${parsed.length} event${parsed.length !== 1 ? 's' : ''}`}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

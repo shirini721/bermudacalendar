@@ -1,287 +1,232 @@
 import * as XLSX from 'xlsx';
-import { EventCategory, type ParsedEventRow } from '@/types';
+import type { CalEvent } from '@/types';
 
-type RawRow = Record<string, unknown>;
+type Category = CalEvent['category'];
 
-// ─── Standard column-based format helpers ────────────────────────────────────
-
-function normalizeKey(key: string): string {
-  return key.toLowerCase().replace(/[\s_-]+/g, '_').trim();
+function categorize(text: string): Category {
+  const lower = text.toLowerCase();
+  if (/doctor|dentist|pediatric|vaccine|dr\.|physician|appointment|medical|clinic|hospital/.test(lower)) return 'medical';
+  if (/flight|hotel|check.?in|check.?out|trip|travel|airport|airbnb|resort|cruise|vacation/.test(lower)) return 'vacation';
+  if (/game|tennis|yoga|golf|kayak|boat|soccer|swim|swim|practice|tournament|sport|league|lacrosse|hockey|basketball|baseball|softball|football|volleyball|ski|skiing/.test(lower)) return 'sports';
+  if (/birthday|born|bday/.test(lower)) return 'birthday';
+  if (/school|class|panel|conference|graduation|prom|exam|semester|homework|college|university|campus/.test(lower)) return 'school';
+  return 'other';
 }
 
-function parseDate(value: unknown): string | null {
-  if (!value) return null;
-  if (typeof value === 'number') {
-    const date = XLSX.SSF.parse_date_code(value);
-    if (date) {
-      return `${date.y}-${String(date.m).padStart(2, '0')}-${String(date.d).padStart(2, '0')}`;
+function extractTime(text: string): { hour: number; minute: number } | null {
+  const match = text.match(/\b(\d{1,2}):(\d{2})\s*(am|pm)\b/i);
+  if (!match) {
+    const shortMatch = text.match(/\b(\d{1,2})\s*(am|pm)\b/i);
+    if (shortMatch) {
+      let hour = parseInt(shortMatch[1], 10);
+      const meridiem = shortMatch[2].toLowerCase();
+      if (meridiem === 'pm' && hour !== 12) hour += 12;
+      if (meridiem === 'am' && hour === 12) hour = 0;
+      return { hour, minute: 0 };
     }
+    return null;
   }
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) return trimmed.substring(0, 10);
-    const mdy = trimmed.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
-    if (mdy) return `${mdy[3]}-${mdy[1].padStart(2, '0')}-${mdy[2].padStart(2, '0')}`;
-    const d = new Date(trimmed);
-    if (!isNaN(d.getTime())) return d.toISOString().substring(0, 10);
+  let hour = parseInt(match[1], 10);
+  const minute = parseInt(match[2], 10);
+  const meridiem = match[3].toLowerCase();
+  if (meridiem === 'pm' && hour !== 12) hour += 12;
+  if (meridiem === 'am' && hour === 12) hour = 0;
+  return { hour, minute };
+}
+
+function buildDateString(year: number, month: number, day: number, time: { hour: number; minute: number } | null, allDay: boolean): string {
+  const mm = String(month).padStart(2, '0');
+  const dd = String(day).padStart(2, '0');
+  if (allDay || !time) {
+    return `${year}-${mm}-${dd}`;
   }
-  return null;
+  const hh = String(time.hour).padStart(2, '0');
+  const min = String(time.minute).padStart(2, '0');
+  return `${year}-${mm}-${dd}T${hh}:${min}:00`;
 }
 
-function parseTime(value: unknown): string | null {
-  if (!value) return null;
-  if (typeof value === 'number') {
-    const totalMinutes = Math.round(value * 24 * 60);
-    const hours = Math.floor(totalMinutes / 60) % 24;
-    const minutes = totalMinutes % 60;
-    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
-  }
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    const hms = trimmed.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
-    if (hms) return `${hms[1].padStart(2, '0')}:${hms[2]}`;
-    const ampm = trimmed.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
-    if (ampm) {
-      let hours = parseInt(ampm[1], 10);
-      const minutes = ampm[2];
-      const meridiem = ampm[3].toUpperCase();
-      if (meridiem === 'PM' && hours !== 12) hours += 12;
-      if (meridiem === 'AM' && hours === 12) hours = 0;
-      return `${String(hours).padStart(2, '0')}:${minutes}`;
-    }
-  }
-  return null;
-}
-
-function parseBool(value: unknown): boolean {
-  if (typeof value === 'boolean') return value;
-  if (typeof value === 'number') return value !== 0;
-  if (typeof value === 'string') return ['yes', 'true', '1', 'y'].includes(value.toLowerCase().trim());
-  return false;
-}
-
-function parseCategory(value: unknown): EventCategory {
-  if (!value) return EventCategory.Other;
-  const str = String(value).toLowerCase().trim();
-  const map: Record<string, EventCategory> = {
-    school: EventCategory.School, sports: EventCategory.Sports, sport: EventCategory.Sports,
-    medical: EventCategory.Medical, health: EventCategory.Medical, doctor: EventCategory.Medical,
-    vacation: EventCategory.Vacation, holiday: EventCategory.Vacation,
-    birthday: EventCategory.Birthday, bday: EventCategory.Birthday, other: EventCategory.Other,
-  };
-  return map[str] ?? EventCategory.Other;
-}
-
-function buildDateTime(dateStr: string, timeStr: string | null): string {
-  if (!timeStr) return `${dateStr}T00:00:00.000Z`;
-  return `${dateStr}T${timeStr}:00`;
-}
-
-// ─── Weekly tracker format helpers ───────────────────────────────────────────
-
-// Matches: "12/2", "12/2 (Monday):", "12/2:", "1/27 Wednesday train..." etc.
-const DATE_LINE_RE = /^(\d{1,2})\/(\d{1,2})(?:\s*\([^)]*\))?[:\s]/;
-
-// Extract first time mention from a description, e.g. "7:30am", "6:45pm", "3:01pm"
-const TIME_IN_TEXT_RE = /\b(\d{1,2}):(\d{2})\s*(am|pm)\b/i;
-
-function guessCategory(text: string): EventCategory {
-  const t = text.toLowerCase();
-  if (/doctor|pediatric|appointment|appt|gyno|physical|dentist|vaccine|shot|ob-gyn|medical|hospital|clinic/.test(t)) return EventCategory.Medical;
-  if (/birthday|born|bday/.test(t)) return EventCategory.Birthday;
-  if (/flight|hotel|check.?in|check.?out|depart|arrive|trip|travel|airbnb|resort|drive to|pick up car|rental/.test(t)) return EventCategory.Vacation;
-  if (/game|basketball|football|tennis|yoga|golf|run|workout|soccer|sports|kayak|boat|bird tour|archery/.test(t)) return EventCategory.Sports;
-  if (/school|class|panel|conference|lecture|seminar|event|summit|colloquy/.test(t)) return EventCategory.School;
-  return EventCategory.Other;
-}
-
-function extractTimeFromText(text: string): string | null {
-  const m = text.match(TIME_IN_TEXT_RE);
-  if (!m) return null;
-  let hours = parseInt(m[1], 10);
-  const minutes = m[2];
-  const meridiem = m[3].toLowerCase();
-  if (meridiem === 'pm' && hours !== 12) hours += 12;
-  if (meridiem === 'am' && hours === 12) hours = 0;
-  return `${String(hours).padStart(2, '0')}:${minutes}`;
-}
-
-function makeDateISO(year: number, month: number, day: number): string {
-  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-}
-
-/**
- * Detect if the sheet looks like the "weekly tracker" format:
- * 2 columns, column B contains multi-line text with M/D date patterns.
- */
-function isWeeklyTrackerFormat(rawRows: unknown[][]): boolean {
-  if (rawRows.length < 2) return false;
-  let dateLineCount = 0;
-  for (const row of rawRows.slice(0, 20)) {
-    const b = String(row[1] ?? '');
-    if (b.includes('\n')) {
-      const lines = b.split('\n');
-      for (const line of lines) {
-        if (DATE_LINE_RE.test(line.trim())) dateLineCount++;
+function isWeeklyTrackerFormat(rows: string[][]): boolean {
+  if (rows.length < 3) return false;
+  let datePatternCount = 0;
+  for (const row of rows) {
+    const cellB = row[1] || '';
+    const lines = cellB.split('\n');
+    for (const line of lines) {
+      if (/^\d{1,2}\/\d{1,2}/.test(line.trim())) {
+        datePatternCount++;
       }
     }
-    // Also check if col A looks like a date/week reference
-    const a = String(row[0] ?? '');
-    if (/\d{1,2}\/\d{1,2}/.test(a)) dateLineCount++;
   }
-  return dateLineCount >= 3;
+  return datePatternCount >= 3;
 }
 
-/**
- * Extract an explicit 4-digit year from a cell string.
- */
-function extractYear(text: string): number | null {
-  const m = text.match(/\b(20\d{2})\b/);
-  return m ? parseInt(m[1]) : null;
-}
-
-/**
- * Parse the "weekly tracker" 2-column format.
- * Col A = week/period header; Col B = multi-line event descriptions.
- */
-function parseWeeklyTracker(rawRows: unknown[][]): ParsedEventRow[] {
-  const events: ParsedEventRow[] = [];
-
-  // Find the earliest explicit year in any column A header
+function parseWeeklyTracker(rows: string[][]): CalEvent[] {
+  const events: CalEvent[] = [];
   let currentYear = new Date().getFullYear();
-  for (const row of rawRows) {
-    const y = extractYear(String(row[0] ?? ''));
-    if (y) { currentYear = y; break; }
-    const y2 = extractYear(String(row[1] ?? ''));
-    if (y2) { currentYear = y2; break; }
-  }
-  // If no explicit year found, assume data starts ~1 year ago (common for trackers)
-  // We'll let the month-rollover logic handle the rest.
+  let lastMonth = -1;
 
-  let lastMonth = 0;
+  for (const row of rows) {
+    const colA = String(row[0] || '').trim();
+    const colB = String(row[1] || '').trim();
 
-  for (const row of rawRows) {
-    const colA = String(row[0] ?? '').trim();
-    const colB = String(row[1] ?? '').trim();
-
-    // Check if col A itself contains an explicit year anchor
-    const yearAnchor = extractYear(colA) ?? extractYear(colB);
-    if (yearAnchor) currentYear = yearAnchor;
-
-    // Also check col A for a simple date like "12/5" or "4/17" as the week marker
-    const colADateMatch = colA.match(/^(\d{1,2})\/(\d{1,2})/);
-    if (colADateMatch) {
-      const headerMonth = parseInt(colADateMatch[1]);
-      // Detect year rollover from the week headers themselves
-      if (lastMonth > 10 && headerMonth <= 3) currentYear++;
-      if (headerMonth > lastMonth + 1 && lastMonth !== 0 && headerMonth < lastMonth) currentYear++;
-      lastMonth = Math.max(lastMonth, headerMonth);
+    // Try to extract explicit year from col A
+    const yearMatch = colA.match(/\b(20\d{2})\b/);
+    if (yearMatch) {
+      currentYear = parseInt(yearMatch[1], 10);
     }
 
-    const text = colB || colA;
-    if (!text) continue;
+    if (!colB) continue;
 
-    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+    const lines = colB.split('\n');
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i].trim();
+      // Match lines like: 9/5 or 9/15 or 9/5 (Mon): or 9/5 (Monday) -
+      const dateMatch = line.match(/^(\d{1,2})\/(\d{1,2})(?:\s*\([^)]*\))?\s*[:\-]?\s*(.*)/);
+      if (dateMatch) {
+        const month = parseInt(dateMatch[1], 10);
+        const day = parseInt(dateMatch[2], 10);
+        let descLines = dateMatch[3] ? [dateMatch[3].trim()] : [];
 
-    for (const line of lines) {
-      const match = line.match(/^(\d{1,2})\/(\d{1,2})(?:\s*\([^)]*\))?[:\s](.+)/s);
-      if (!match) continue;
+        // Collect continuation lines that don't start with a new date pattern
+        i++;
+        while (i < lines.length) {
+          const next = lines[i].trim();
+          if (/^\d{1,2}\/\d{1,2}/.test(next)) break;
+          if (next) descLines.push(next);
+          i++;
+        }
 
-      const month = parseInt(match[1]);
-      const day = parseInt(match[2]);
-      const rawDesc = match[3].replace(/^[:\s]+/, '').trim();
+        // Track month transitions for year increment
+        if (lastMonth >= 11 && month <= 3) {
+          currentYear++;
+        }
+        lastMonth = month;
 
-      // Detect year rollover: if month drops significantly (e.g. Dec→Jan)
-      if (lastMonth > 10 && month <= 3) currentYear++;
+        const fullDesc = descLines.join(' ').trim();
+        const timeInfo = extractTime(fullDesc);
+        const allDay = timeInfo === null;
 
-      lastMonth = month;
+        const startStr = buildDateString(currentYear, month, day, timeInfo, allDay);
+        const endStr = allDay
+          ? buildDateString(currentYear, month, day, null, true)
+          : buildDateString(currentYear, month, day, { hour: timeInfo!.hour + 1, minute: timeInfo!.minute }, false);
 
-      const dateStr = makeDateISO(currentYear, month, day);
+        const title = (fullDesc.split(/[,\n]/)[0] || fullDesc).trim().slice(0, 90) || `Event ${month}/${day}`;
 
-      // Extract first time from the description for a more precise event time
-      const timeStr = extractTimeFromText(rawDesc);
-
-      // Title = first sentence/clause (up to first period, newline, or 80 chars)
-      const titleRaw = rawDesc.split(/\n/)[0].replace(/["]+/g, '').trim();
-      const title = titleRaw.length > 90 ? titleRaw.substring(0, 87) + '…' : titleRaw;
-
-      const startAt = timeStr ? `${dateStr}T${timeStr}:00` : `${dateStr}T00:00:00.000Z`;
-      const endAt = timeStr
-        ? `${dateStr}T${timeStr}:00` // same time; calendar will show as point event
-        : `${dateStr}T23:59:59.000Z`;
-
-      events.push({
-        title: title || `Event ${month}/${day}`,
-        description: rawDesc,
-        start_at: startAt,
-        end_at: endAt,
-        all_day: !timeStr,
-        location: undefined,
-        category: guessCategory(rawDesc),
-        assigned_to: undefined,
-      });
+        events.push({
+          id: crypto.randomUUID(),
+          title,
+          description: fullDesc || null,
+          start: startStr,
+          end: endStr,
+          allDay,
+          location: null,
+          category: categorize(fullDesc),
+          color: null,
+          createdAt: new Date().toISOString(),
+        });
+      } else {
+        i++;
+      }
     }
   }
 
   return events;
 }
 
-// ─── Standard column-based parser ────────────────────────────────────────────
+function parseStandardFormat(rows: string[][], headers: string[]): CalEvent[] {
+  const events: CalEvent[] = [];
+  const hLower = headers.map(h => String(h || '').toLowerCase().trim());
 
-function parseStandardFormat(rows: RawRow[]): ParsedEventRow[] {
-  const results: ParsedEventRow[] = [];
-
-  for (const rawRow of rows) {
-    const row: RawRow = {};
-    for (const [key, val] of Object.entries(rawRow)) {
-      row[normalizeKey(key)] = val;
+  const idx = (names: string[]) => {
+    for (const n of names) {
+      const i = hLower.findIndex(h => h.includes(n));
+      if (i !== -1) return i;
     }
+    return -1;
+  };
 
-    const title = String(row['title'] ?? row['name'] ?? row['event'] ?? '').trim();
+  const titleIdx = idx(['title', 'name', 'event', 'subject']);
+  const startIdx = idx(['start_date', 'start date', 'start', 'date', 'begin']);
+  const endIdx = idx(['end_date', 'end date', 'end', 'finish']);
+  const locationIdx = idx(['location', 'place', 'venue']);
+  const descIdx = idx(['description', 'desc', 'notes', 'note', 'details']);
+  const categoryIdx = idx(['category', 'cat', 'type']);
+  const allDayIdx = idx(['all_day', 'all day', 'allday']);
+
+  for (const row of rows) {
+    if (!row || row.every(c => !c)) continue;
+
+    const title = titleIdx >= 0 ? String(row[titleIdx] || '').trim() : '';
     if (!title) continue;
 
-    const startDateStr = parseDate(row['start_date'] ?? row['date'] ?? row['start']);
-    if (!startDateStr) continue;
+    const rawStart = startIdx >= 0 ? String(row[startIdx] || '').trim() : '';
+    const rawEnd = endIdx >= 0 ? String(row[endIdx] || '').trim() : rawStart;
 
-    const endDateStr = parseDate(row['end_date'] ?? row['end'] ?? '') ?? startDateStr;
-    const startTimeStr = parseTime(row['start_time'] ?? row['time'] ?? '');
-    const endTimeStr = parseTime(row['end_time'] ?? '');
-    const allDay = row['all_day'] !== undefined ? parseBool(row['all_day']) : !startTimeStr;
+    if (!rawStart) continue;
 
-    const startAt = allDay ? `${startDateStr}T00:00:00.000Z` : buildDateTime(startDateStr, startTimeStr);
-    const endAt = allDay ? `${endDateStr}T23:59:59.000Z` : buildDateTime(endDateStr, endTimeStr ?? startTimeStr);
+    // Try to parse dates
+    const parseDate = (raw: string): string => {
+      const d = new Date(raw);
+      if (!isNaN(d.getTime())) return d.toISOString();
+      return raw;
+    };
 
-    const location = String(row['location'] ?? row['place'] ?? '').trim() || undefined;
-    const description = String(row['description'] ?? row['notes'] ?? row['note'] ?? '').trim() || undefined;
-    const category = parseCategory(row['category'] ?? row['type'] ?? '');
-    const assignedRaw = String(row['assigned_to'] ?? row['assigned'] ?? row['member'] ?? '').trim();
-    const assigned_to = assignedRaw ? assignedRaw.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+    const start = parseDate(rawStart);
+    const end = rawEnd ? parseDate(rawEnd) : start;
 
-    results.push({ title, start_at: startAt, end_at: endAt, all_day: allDay, location, description, category, assigned_to });
+    const rawCategory = categoryIdx >= 0 ? String(row[categoryIdx] || '').toLowerCase().trim() : '';
+    const validCategories: Category[] = ['school', 'sports', 'medical', 'vacation', 'birthday', 'other'];
+    const category: Category = validCategories.includes(rawCategory as Category)
+      ? (rawCategory as Category)
+      : categorize(title + ' ' + (descIdx >= 0 ? String(row[descIdx] || '') : ''));
+
+    const rawAllDay = allDayIdx >= 0 ? String(row[allDayIdx] || '').toLowerCase() : '';
+    const allDay = rawAllDay === 'true' || rawAllDay === 'yes' || rawAllDay === '1'
+      ? true
+      : rawAllDay === 'false' || rawAllDay === 'no' || rawAllDay === '0'
+        ? false
+        : !rawStart.includes(':');
+
+    events.push({
+      id: crypto.randomUUID(),
+      title,
+      description: descIdx >= 0 ? (String(row[descIdx] || '').trim() || null) : null,
+      start,
+      end,
+      allDay,
+      location: locationIdx >= 0 ? (String(row[locationIdx] || '').trim() || null) : null,
+      category,
+      color: null,
+      createdAt: new Date().toISOString(),
+    });
   }
 
-  return results;
+  return events;
 }
 
-// ─── Main export ──────────────────────────────────────────────────────────────
-
-export function parseSpreadsheet(fileBuffer: ArrayBuffer): ParsedEventRow[] {
-  const workbook = XLSX.read(fileBuffer, { type: 'array', cellDates: false });
+export function parseSpreadsheet(buffer: ArrayBuffer): CalEvent[] {
+  const workbook = XLSX.read(buffer, { type: 'array', cellText: true, cellDates: true });
   const sheetName = workbook.SheetNames[0];
   const sheet = workbook.Sheets[sheetName];
 
-  // Read as raw 2D array to check format
-  const rawRows: unknown[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+  // Get as array of arrays with raw strings
+  const rawRows: string[][] = XLSX.utils.sheet_to_json(sheet, {
+    header: 1,
+    defval: '',
+    raw: false,
+  }) as string[][];
 
   if (rawRows.length === 0) return [];
 
+  // Check for weekly tracker format
   if (isWeeklyTrackerFormat(rawRows)) {
-    return parseWeeklyTracker(rawRows).slice(0, 500);
+    return parseWeeklyTracker(rawRows);
   }
 
-  // Fall back to standard column format
-  const rows: RawRow[] = XLSX.utils.sheet_to_json(sheet, { defval: '' });
-  return parseStandardFormat(rows).slice(0, 500);
+  // Standard format: first row is headers
+  const headers = rawRows[0];
+  const dataRows = rawRows.slice(1);
+  return parseStandardFormat(dataRows, headers);
 }
