@@ -21,6 +21,8 @@ export async function POST(request: NextRequest) {
     location: body.location ? String(body.location).trim() || null : null,
     category: body.category || 'other',
     color: body.color || null,
+    person: body.person ?? null,
+    checklist: body.checklist ?? null,
     createdAt: new Date().toISOString(),
   };
 
