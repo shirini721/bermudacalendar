@@ -124,6 +124,8 @@ function parseWeeklyTracker(rows: string[][]): CalEvent[] {
           location: null,
           category: categorize(fullDesc),
           color: null,
+          person: null,
+          checklist: null,
           createdAt: new Date().toISOString(),
         });
       } else {
@@ -199,6 +201,8 @@ function parseStandardFormat(rows: string[][], headers: string[]): CalEvent[] {
       location: locationIdx >= 0 ? (String(row[locationIdx] || '').trim() || null) : null,
       category,
       color: null,
+      person: null,
+      checklist: null,
       createdAt: new Date().toISOString(),
     });
   }
