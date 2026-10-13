@@ -67,22 +67,34 @@ function makeEvent(month: number, day: number, year: number, desc: string): CalE
   };
 }
 
+const MONTH_MAP: Record<string, number> = {
+  january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
+  july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
+  jan: 1, feb: 2, mar: 3, apr: 4, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+
+// Returns true if the text looks like a section header (date range or broad label)
+// e.g. "November 28-December 1: Thanksgiving" or "March Trip to Kiawah"
+function isSectionHeader(text: string): boolean {
+  // Date range: "11/28-12/1" or "November 28-December 1"
+  if (/\d{1,2}\/\d{1,2}\s*[-–]\s*\d{1,2}\/\d{1,2}/.test(text)) return true;
+  if (/^(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\s*[-–]/i.test(text)) return true;
+  // Named month header without a day+colon like "December:" or "March Trip"
+  if (/^(january|february|march|april|may|june|july|august|september|october|november|december)\b(?!\s+\d{1,2}\s*[:\(])/i.test(text)) return true;
+  return false;
+}
+
 // Extract all date-prefixed events from a block of text.
-// Lines like "11/26: ..." or "11/26 (Mon): ..." each become an event.
-// Lines like "July 14 (Tuesday): ..." are also matched.
-function extractEventsFromText(text: string, fallbackMonth: number, fallbackDay: number, year: number): Array<{ month: number; day: number; desc: string }> {
+function extractEventsFromText(text: string, year: number): Array<{ month: number; day: number; desc: string }> {
   const results: Array<{ month: number; day: number; desc: string }> = [];
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-
-  const MONTH_MAP: Record<string, number> = {
-    january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
-    july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
-    jan: 1, feb: 2, mar: 3, apr: 4, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
-  };
 
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
+
+    // Skip section header lines
+    if (isSectionHeader(line)) { i++; continue; }
 
     // Numeric: 11/26: desc  or  11/26 (Mon): desc
     const numericMatch = line.match(/^(\d{1,2})\/(\d{1,2})(?:\/\d{2,4})?\s*(?:\([^)]*\))?\s*[:\-]?\s*(.*)/);
@@ -92,20 +104,20 @@ function extractEventsFromText(text: string, fallbackMonth: number, fallbackDay:
       if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
         let desc = numericMatch[3].trim();
         i++;
-        // Collect continuation lines
         while (i < lines.length) {
           const next = lines[i];
-          if (/^\d{1,2}\/\d{1,2}/.test(next) || /^(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d/i.test(next)) break;
+          if (/^\d{1,2}\/\d{1,2}/.test(next) ||
+              /^(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d/i.test(next)) break;
           if (next) desc += (desc ? ' ' : '') + next;
           i++;
         }
-        results.push({ month: m, day: d, desc });
+        if (desc) results.push({ month: m, day: d, desc });
         continue;
       }
     }
 
-    // Named month: "July 14 (Tuesday): desc"  or  "July 14: desc"
-    const namedMatch = line.match(/^(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:\s*\([^)]*\))?\s*[:\-]?\s*(.*)/i);
+    // Named month: "July 14 (Tuesday): desc"
+    const namedMatch = line.match(/^(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:\s*\([^)]*\))?\s*[:\-]\s*(.*)/i);
     if (namedMatch) {
       const m = MONTH_MAP[namedMatch[1].toLowerCase()];
       const d = parseInt(namedMatch[2], 10);
@@ -113,18 +125,13 @@ function extractEventsFromText(text: string, fallbackMonth: number, fallbackDay:
       i++;
       while (i < lines.length) {
         const next = lines[i];
-        if (/^\d{1,2}\/\d{1,2}/.test(next) || /^(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d/i.test(next)) break;
+        if (/^\d{1,2}\/\d{1,2}/.test(next) ||
+            /^(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d/i.test(next)) break;
         if (next) desc += (desc ? ' ' : '') + next;
         i++;
       }
       if (desc) results.push({ month: m, day: d, desc });
       continue;
-    }
-
-    // Weekday-only line like "(Tuesday): Parnia goes to paint tiles"
-    const weekdayMatch = line.match(/^\([^)]*\)\s*[:\-]\s*(.*)/);
-    if (weekdayMatch && weekdayMatch[1].trim()) {
-      results.push({ month: fallbackMonth, day: fallbackDay, desc: weekdayMatch[1].trim() });
     }
 
     i++;
@@ -133,22 +140,77 @@ function extractEventsFromText(text: string, fallbackMonth: number, fallbackDay:
   return results;
 }
 
+// Detect the correct starting year by finding the first explicit year anchor
+// and the first datable month before it, then reasoning about which year the
+// sheet starts in.
+function detectStartingYear(rows: string[][]): number {
+  let firstExplicitYear = -1;
+  let firstExplicitRow = -1;
+
+  for (let i = 0; i < rows.length; i++) {
+    const text = String(rows[i][0] || '') + ' ' + String(rows[i][1] || '');
+    const m = text.match(/\b(20\d{2})\b/);
+    if (m) {
+      firstExplicitYear = parseInt(m[1], 10);
+      firstExplicitRow = i;
+      break;
+    }
+  }
+
+  if (firstExplicitYear === -1) return new Date().getFullYear();
+
+  // Find the first datable month before the explicit year row
+  let firstDateableMonth = -1;
+  for (let i = 0; i < firstExplicitRow && firstDateableMonth === -1; i++) {
+    const colA = String(rows[i][0] || '').trim();
+    const colB = String(rows[i][1] || '').trim();
+    const aMatch = colA.split('\n')[0].match(/^(\d{1,2})\/\d{1,2}/);
+    if (aMatch) { firstDateableMonth = parseInt(aMatch[1], 10); break; }
+    const bMatch = colB.match(/^(\d{1,2})\/\d{1,2}/);
+    if (bMatch) { firstDateableMonth = parseInt(bMatch[1], 10); break; }
+    // Named month in col B
+    const namedMatch = colB.match(/^(january|february|march|april|may|june|july|august|september|october|november|december)/i);
+    if (namedMatch) { firstDateableMonth = MONTH_MAP[namedMatch[1].toLowerCase()]; break; }
+  }
+
+  if (firstDateableMonth === -1) return firstExplicitYear;
+
+  // If the sheet starts in the latter half of the year and the first explicit
+  // year is later, the opening events are from the prior year.
+  // e.g. sheet starts in November (11), first explicit year is 2025 → start at 2024
+  if (firstDateableMonth >= 7) return firstExplicitYear - 1;
+  return firstExplicitYear;
+}
+
+function deduplicateEvents(events: CalEvent[]): CalEvent[] {
+  const seen = new Set<string>();
+  return events.filter(e => {
+    const key = `${e.start.slice(0, 10)}|${e.title.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 50)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function parseCalendarSheet(rows: string[][]): CalEvent[] {
   const events: CalEvent[] = [];
-  let currentYear = new Date().getFullYear();
+  let currentYear = detectStartingYear(rows);
   let lastMonth = -1;
 
   for (const row of rows) {
     const colA = String(row[0] || '').trim();
     const colB = String(row[1] || '').trim();
 
-    // Extract explicit year from either column
+    // Update year when an explicit year is mentioned in this row
     const yearMatch = (colA + ' ' + colB).match(/\b(20\d{2})\b/);
     if (yearMatch) currentYear = parseInt(yearMatch[1], 10);
 
     if (!colA && !colB) continue;
 
-    // --- Pattern 1: col A has a date like "12/2" or "9/5/2025", col B has description ---
+    // Skip section headers in col B (date ranges, broad labels)
+    if (!colA && colB && isSectionHeader(colB)) continue;
+
+    // --- Pattern 1: col A has a simple date like "12/2" or "9/5/2025" ---
     const colADateMatch = colA.split('\n')[0].trim().match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?$/);
     if (colADateMatch && colB) {
       const month = parseInt(colADateMatch[1], 10);
@@ -159,42 +221,38 @@ function parseCalendarSheet(rows: string[][]): CalEvent[] {
         currentYear = yr;
       }
       if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-        // Track year rollover
-        if (lastMonth >= 11 && month <= 3) currentYear++;
+        if (lastMonth > 0 && lastMonth >= 11 && month <= 3) currentYear++;
         lastMonth = month;
 
-        // col B may contain multiple sub-events with their own dates
-        const subEvents = extractEventsFromText(colB, month, day, currentYear);
+        // col B may have multiple dated sub-events
+        const subEvents = extractEventsFromText(colB, currentYear);
         if (subEvents.length > 0) {
           for (const se of subEvents) {
             if (lastMonth >= 11 && se.month <= 3) currentYear++;
             lastMonth = se.month;
-            if (se.desc) events.push(makeEvent(se.month, se.day, currentYear, se.desc));
+            events.push(makeEvent(se.month, se.day, currentYear, se.desc));
           }
         } else {
-          // Treat the whole col B as one event on the col A date
-          const desc = colB.replace(/\n/g, ' ').trim();
-          // Strip leading weekday like "(Monday): "
-          const cleaned = desc.replace(/^\([^)]*\)\s*[:\-]\s*/, '').trim();
-          if (cleaned) events.push(makeEvent(month, day, currentYear, cleaned));
+          // Single event: use col A date, col B as description
+          const desc = colB.replace(/\n/g, ' ').trim().replace(/^\([^)]*\)\s*[:\-]\s*/, '').trim();
+          if (desc) events.push(makeEvent(month, day, currentYear, desc));
         }
         continue;
       }
     }
 
-    // --- Pattern 2: col B starts with a date like "11/26: ..." ---
+    // --- Pattern 2: dates embedded in col B (col A is empty or a section header) ---
     if (colB) {
-      const subEvents = extractEventsFromText(colB, -1, -1, currentYear);
+      const subEvents = extractEventsFromText(colB, currentYear);
       for (const se of subEvents) {
-        if (se.month < 1) continue;
         if (lastMonth >= 11 && se.month <= 3) currentYear++;
         lastMonth = se.month;
-        if (se.desc) events.push(makeEvent(se.month, se.day, currentYear, se.desc));
+        events.push(makeEvent(se.month, se.day, currentYear, se.desc));
       }
     }
   }
 
-  return events;
+  return deduplicateEvents(events);
 }
 
 function isStandardFormat(headers: string[]): boolean {
@@ -273,7 +331,7 @@ function parseStandardFormat(rows: string[][], headers: string[]): CalEvent[] {
 export function parseSpreadsheet(buffer: ArrayBuffer): CalEvent[] {
   const workbook = XLSX.read(buffer, { type: 'array', cellText: true, cellDates: true });
 
-  // Prefer a sheet named "Calendar" if present
+  // Prefer the sheet named "Calendar" if present
   const calendarSheetName = workbook.SheetNames.find(n => n.toLowerCase() === 'calendar') ?? workbook.SheetNames[0];
   const sheet = workbook.Sheets[calendarSheetName];
 
@@ -285,12 +343,10 @@ export function parseSpreadsheet(buffer: ArrayBuffer): CalEvent[] {
 
   if (rawRows.length === 0) return [];
 
-  // Check if first non-empty row looks like standard column headers
   const firstRow = rawRows[0];
   if (isStandardFormat(firstRow)) {
     return parseStandardFormat(rawRows.slice(1), firstRow);
   }
 
-  // Otherwise treat as the tracker/calendar format
   return parseCalendarSheet(rawRows);
 }
